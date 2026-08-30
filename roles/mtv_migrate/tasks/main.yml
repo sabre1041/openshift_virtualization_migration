@@ -12,7 +12,6 @@
 
 - name: Initialize Data Structures
   ansible.builtin.set_fact:
-    _mtv_migrate_mtv_vms_to_migrate: {}
     _mtv_migrate_mtv_plans: []
     _mtv_migrate_mtv_plans_to_migrate: []
     _mtv_migrate_mtv_migrations: []

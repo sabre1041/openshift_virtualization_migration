@@ -26,16 +26,18 @@
     quiet: true
     fail_msg: "Unable to locate Destination Provider with name '{{ _mtv_migrate_mtv_destination_target }}' in namespace '{{ _mtv_migrate_mtv_destination_target_namespace }}'" # noqa: yaml[line-length]
 
-- name: _plans | Retrieve StorageMaps
+- name: _plans | Retrieve StorageMap
   kubernetes.core.k8s_info:
     api_version: forklift.konveyor.io/v1beta1
     kind: StorageMap
+    name: "{{ _mtv_migrate_mtv_storage_map_name }}"
+    namespace: "{{ _mtv_migrate_mtv_storage_map_namespace }}"
   register: mtv_migrate_storagemap_results
 
 - name: _plans | Verify StorageMap
   ansible.builtin.assert:
     that:
-      - mtv_migrate_storagemap_results.resources | selectattr('metadata.name', 'equalto', _mtv_migrate_mtv_storage_map_name) | selectattr('metadata.namespace', 'equalto', _mtv_migrate_mtv_storage_map_namespace) | list | length == 1 # noqa: yaml[line-length]
+      - mtv_migrate_storagemap_results.resources | length == 1
     quiet: true
     fail_msg: "Unable to locate StorageMap with name '{{ _mtv_migrate_mtv_storage_map_name }}' in namespace '{{ _mtv_migrate_mtv_storage_map_namespace }}'" # noqa: yaml[line-length]
 
@@ -43,12 +45,14 @@
   kubernetes.core.k8s_info:
     api_version: forklift.konveyor.io/v1beta1
     kind: NetworkMap
+    name: "{{ _mtv_migrate_mtv_network_map_name }}"
+    namespace: "{{ _mtv_migrate_mtv_network_map_namespace }}"
   register: mtv_migrate_networkmap_results
 
 - name: _plans | Verify NetworkMap
   ansible.builtin.assert:
     that:
-      - mtv_migrate_networkmap_results.resources | selectattr('metadata.name', 'equalto', _mtv_migrate_mtv_network_map_name) | selectattr('metadata.namespace', 'equalto', _mtv_migrate_mtv_network_map_namespace) | list | length == 1 # noqa: yaml[line-length]
+      - mtv_migrate_networkmap_results.resources | length == 1
     quiet: true
     fail_msg: "Unable to locate NetworkMap with name '{{ _mtv_migrate_mtv_network_map_name }}' in namespace '{{ _mtv_migrate_mtv_network_map_namespace }}'" # noqa: yaml[line-length]
 
@@ -64,53 +68,33 @@
     mtv_management_inventory_query_endpoint: /providers/{{ _mtv_migrate_mtv_source_type }}/{{ (_mtv_migrate_mtv_inventory_providers[_mtv_migrate_mtv_source_type] | selectattr('name', 'equalto', _mtv_migrate_mtv_source_target) | selectattr('namespace', 'equalto', _mtv_migrate_mtv_source_target_namespace) | list | first).uid }}/vms?detail=4 # noqa: yaml[line-length]
     mtv_management_inventory_query_result_var: _mtv_migrate_mtv_inventory_vms
 
-- name: _plans | Manage specified folders
+- name: _plans | Get Inventory folders
+  ansible.builtin.include_role:
+    name: mtv_management
+    tasks_from: mtv_query_inventory.yml
+  vars:
+    mtv_management_inventory_query_endpoint: /providers/{{ _mtv_migrate_mtv_source_type }}/{{ (_mtv_migrate_mtv_inventory_providers[_mtv_migrate_mtv_source_type] | selectattr('name', 'equalto', _mtv_migrate_mtv_source_target) | selectattr('namespace', 'equalto', _mtv_migrate_mtv_source_target_namespace) | list | first).uid }}/folders?detail=4 # noqa: yaml[line-length]
+    mtv_management_inventory_query_result_var: _mtv_migrate_mtv_inventory_folders
   when:
     - "'folders' in mtv_migrate_migration_request"
-    - folder_to_process['exclude'] is not defined or 'exclude' in folder_to_process and not folder_to_process['exclude']|bool # noqa: yaml[line-length]
-  block:
-    - name: _plans | Get Inventory folders
-      ansible.builtin.include_role:
-        name: mtv_management
-        tasks_from: mtv_query_inventory.yml
-      vars:
-        mtv_management_inventory_query_endpoint: /providers/{{ _mtv_migrate_mtv_source_type }}/{{ (_mtv_migrate_mtv_inventory_providers[_mtv_migrate_mtv_source_type] | selectattr('name', 'equalto', _mtv_migrate_mtv_source_target) | selectattr('namespace', 'equalto', _mtv_migrate_mtv_source_target_namespace) | list | first).uid }}/folders?detail=4 # noqa: yaml[line-length]
-        mtv_management_inventory_query_result_var: _mtv_migrate_mtv_inventory_folders
+    - mtv_migrate_migration_request['folders'] | default([]) | length > 0
 
-    - name: _plans | Manage specified Folders
-      ansible.builtin.include_tasks: _process_folder.yml
-      loop_control:
-        loop_var: folder_to_process
-      loop: "{{ mtv_migrate_migration_request['folders'] }}"
+- name: _plans | Process VMs and Generate Plans
+  infra.openshift_virtualization_migration.mtv_process_vms:
+    inventory_vms: "{{ _mtv_migrate_mtv_inventory_vms }}"
+    inventory_folders: "{{ _mtv_migrate_mtv_inventory_folders | default([]) }}"
+    requested_vms: "{{ mtv_migrate_migration_request['vms'] | default([]) }}"
+    requested_folders: "{{ mtv_migrate_migration_request['folders'] | default([]) }}"
+    vm_overrides: "{{ mtv_migrate_migration_request['vm_overrides'] | default({}) }}"
+    plan_skeleton: "{{ _mtv_migrate_mtv_plan_skeleton }}"
+    plan_base_name: "{{ _mtv_migrate_mtv_plan_base_name }}"
+    split_plans: "{{ _mtv_migrate_mtv_split_plans | bool }}"
+    vms_per_plan: "{{ _mtv_migrate_mtv_vms_per_plan | int }}"
+  register: _mtv_migrate_process_result
 
-- name: _plans | Manage specified VM's
-  ansible.builtin.include_tasks: _process_vm.yml
-  loop_control:
-    loop_var: vm_to_process
-  loop: "{{ mtv_migrate_migration_request['vms'] }}"
-  when:
-    - "'vms' in mtv_migrate_migration_request"
-    - vm_to_process['exclude'] is not defined or 'exclude' in vm_to_process and not vm_to_process['exclude']|bool
-
-- name: _plans | Flatten VM's to Migrate
+- name: _plans | Set Plans from Module Result
   ansible.builtin.set_fact:
-    _mtv_migrate_final_mtv_vms_to_migrate: "{{ _mtv_migrate_mtv_vms_to_migrate | dict2items | map(attribute='value') | list }}" # noqa: yaml[line-length]
-
-- name: _plans | Verify Plan has VMs
-  ansible.builtin.assert:
-    that:
-      - _mtv_migrate_final_mtv_vms_to_migrate | length > 0
-    quiet: true
-    fail_msg: "No VM's exist in plan"
-
-- name: _plans | Process Plans
-  ansible.builtin.include_tasks: _process_plans.yml
-  loop_control:
-    loop_var: _mtv_migrate_plan_vms
-    index_var: _mtv_migrate_plan_vms_idx
-  loop: >-
-    {{ _mtv_migrate_final_mtv_vms_to_migrate |
-     batch(_mtv_migrate_mtv_vms_per_plan | int if _mtv_migrate_mtv_split_plans | bool else -1) }}
+    _mtv_migrate_mtv_plans: "{{ _mtv_migrate_process_result.plans }}"
 
 - name: _plans | Create and Verify Plans
   when: not _mtv_migrate_mtv_dry_run|bool
@@ -145,10 +129,7 @@
 
     - name: _plans | Set Created Plans to Migrate
       ansible.builtin.set_fact:
-        _mtv_migrate_mtv_plans_to_migrate: "{{ _mtv_migrate_mtv_plans_to_migrate | default([]) + [created_plan] }}"
-      loop: "{{ mtv_migrate_plans_create_result.result.results | map(attribute='result') | list if mtv_migrate_plans_create_result.result is defined and 'results' in mtv_migrate_plans_create_result.result else [mtv_migrate_plans_create_result.result] }}" # noqa: yaml[line-length]
-      loop_control:
-        loop_var: created_plan
+        _mtv_migrate_mtv_plans_to_migrate: "{{ mtv_migrate_plans_create_result.result.results | map(attribute='result') | list if mtv_migrate_plans_create_result.result is defined and 'results' in mtv_migrate_plans_create_result.result else [mtv_migrate_plans_create_result.result] }}" # noqa: yaml[line-length]
       when: _mtv_migrate_mtv_start_migration|bool
 
 - name: _plans | Display Plans (Dry Run)
